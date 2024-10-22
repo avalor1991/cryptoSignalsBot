@@ -1,105 +1,126 @@
-from dotenv import load_dotenv
-import os
-import numpy as np
-import pandas as pd
-import time
-import ccxt
 import asyncio
-from telegram import Bot
+import logging
+import json
+import os
+import ccxt
+import telegram
+from dotenv import load_dotenv
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from signals import check_signals
 
-# Load environment variables from .env file
+# Configure logging
+logging.basicConfig(level=logging.DEBUG,
+                    format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Load environment variables
 load_dotenv()
 
-# Load keys and tokens from environment variables
+# Preliminary checks
+required_env_vars = [
+    'KUCOIN_API_KEY',
+    'KUCOIN_API_SECRET',
+    'KUCOIN_API_PASSPHRASE',
+    'TELEGRAM_BOT_TOKEN',
+    'CHAT_ID'
+]
+
+missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+if missing_vars:
+    raise EnvironmentError(f"Missing required environment variables: {', '.join(missing_vars)}")
+
+logger.info("All required environment variables are set.")
+
+# Load configuration
+try:
+    with open('config.json', 'r') as f:
+        config = json.load(f)
+        logger.info("Configuration loaded successfully.")
+except FileNotFoundError as e:
+    logger.error(f"Configuration file not found: {e}")
+    raise
+except json.JSONDecodeError as e:
+    logger.error(f"Error decoding JSON: {e}")
+    raise
+
+# Setup file logging handler
+file_handler = logging.FileHandler('signals_log.txt')
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger.addHandler(file_handler)
+
+# Verify environment variables are loaded
 kucoin_api_key = os.getenv('KUCOIN_API_KEY')
 kucoin_api_secret = os.getenv('KUCOIN_API_SECRET')
 kucoin_api_passphrase = os.getenv('KUCOIN_API_PASSPHRASE')
 telegram_bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
 chat_id = os.getenv('CHAT_ID')
 
-# Initialize clients
-exchange = ccxt.kucoin({
-    'apiKey': kucoin_api_key,
-    'secret': kucoin_api_secret,
-    'password': kucoin_api_passphrase
-})
-bot = Bot(token=telegram_bot_token)
+logger.debug(f"KuCoin API Key: {kucoin_api_key}")
+logger.debug(f"Telegram Bot Token: {telegram_bot_token}")
+logger.debug(f"Chat ID: {chat_id}")
+
+exchange = bot = None
 
 
-# Fetch market data using ccxt
-def fetch_market_data(trading_pair):
+def initialize_services():
+    global exchange, bot
     try:
-        since = exchange.parse8601(exchange.iso8601(time.time() - 24 * 60 * 60 * 1000))
-        ohlcv = exchange.fetch_ohlcv(trading_pair, timeframe='15m', since=since)
-        data = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        data['timestamp'] = pd.to_datetime(data['timestamp'], unit='ms')
-        data.set_index('timestamp', inplace=True)
-        return data
+        logger.info("Initializing KuCoin client...")
+        exchange = ccxt.kucoin({
+            'apiKey': kucoin_api_key,
+            'secret': kucoin_api_secret,
+            'password': kucoin_api_passphrase
+        })
+        logger.info("KuCoin client initialized successfully.")
+        logger.info("Initializing Telegram bot...")
+        bot = telegram.Bot(token=telegram_bot_token)
+        logger.info("Telegram bot initialized successfully.")
     except Exception as e:
-        print(f"Error fetching market data: {e}")
-        return None
+        logger.error(f"Error initializing services: {e}")
+        raise
 
 
-def moving_average_crossover(data):
-    data['SMA_50'] = data['close'].rolling(window=50).mean()
-    data['SMA_200'] = data['close'].rolling(window=200).mean()
-    data['positions'] = np.where(data['SMA_50'] > data['SMA_200'], 1, -1)
-    return data
-
-
-def calculate_rsi(data, window=14):
-    delta = data['close'].diff(1)
-    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-
-def bollinger_bands(data, window=20, num_std_dev=2):
-    data['rolling_mean'] = data['close'].rolling(window=window).mean()
-    data['rolling_std'] = data['close'].rolling(window=window).std()
-    data['bollinger_upper'] = data['rolling_mean'] + (data['rolling_std'] * num_std_dev)
-    data['bollinger_lower'] = data['rolling_mean'] - (data['rolling_std'] * num_std_dev)
-    return data
-
-
-async def send_signal(message):
+async def periodic_signal_check():
+    logger.info("Starting periodic signal check")
     try:
-        await bot.send_message(chat_id=chat_id, text=message)
+        await check_signals(config, exchange)
+        logger.info("Signal checking completed.")
     except Exception as e:
-        print(f"Error sending message: {e}")
+        logger.error(f"Error during signal checking: {e}")
 
 
-async def check_signals(trading_pairs):
-    for pair in trading_pairs:
-        data = fetch_market_data(pair)
-        if data is not None:
-            mac = moving_average_crossover(data)
-            rsi = calculate_rsi(data)
-            bb_data = bollinger_bands(data)
+def main():
+    logger.info("Initializing services...")
+    initialize_services()
+    scheduler = AsyncIOScheduler()
+    logger.info("Scheduler initialized.")
+    try:
+        interval = config.get('signal_check_interval', 100)  # Default should be 100s now
+        logger.debug(f"Fetched interval from config: {interval}")
+        # Ensure interval is an integer and a positive value
+        interval = int(interval)
+        if interval <= 0:
+            raise ValueError("Interval must be a positive integer")
+        scheduler.add_job(periodic_signal_check, 'interval', seconds=interval)
+        logger.info(f"Scheduled job to run every {interval} seconds.")
+    except KeyError:
+        logger.error("signal_check_interval is missing in the configuration")
+        raise
+    except ValueError as e:
+        logger.error(f"Invalid interval value: {e}")
+        raise
+    scheduler.start()
+    logger.info("Scheduler started.")
+    logger.info("Crypto signals bot is running...")
+    try:
+        asyncio.get_event_loop().run_forever()
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Shutdown initiated...")
+        scheduler.shutdown(wait=False)
+        logger.info("Crypto signals bot stopped.")
 
-            latest_signal = f"Trading Pair: {pair}\n"
-            if mac['positions'].iloc[-1] == 1:
-                latest_signal += f"Moving Average Crossover: Buy Signal\n"
-            elif mac['positions'].iloc[-1] == -1:
-                latest_signal += f"Moving Average Crossover: Sell Signal\n"
-            if rsi.iloc[-1] < 30:
-                latest_signal += f"RSI: Buy Signal (RSI={rsi.iloc[-1]:.2f})\n"
-            elif rsi.iloc[-1] > 70:
-                latest_signal += f"RSI: Sell Signal (RSI={rsi.iloc[-1]:.2f})\n"
-            if data['close'].iloc[-1] < bb_data['bollinger_lower'].iloc[-1]:
-                latest_signal += "Bollinger Bands: Buy Signal\n"
-            elif data['close'].iloc[-1] > bb_data['bollinger_upper'].iloc[-1]:
-                latest_signal += "Bollinger Bands: Sell Signal\n"
-            if "Buy Signal" in latest_signal or "Sell Signal" in latest_signal:
-                await send_signal(latest_signal)
 
-
-async def main():
-    trading_pairs = ["BTC/USDT", "ETH/USDT"]
-    await check_signals(trading_pairs)
-
-
+# Example to run the function
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
