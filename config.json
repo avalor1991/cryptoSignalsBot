@@ -1,0 +1,12 @@
+{
+    "trading_pairs": ["BTC/USDT", "ETH/USDT", "ARPA/USDT"],
+    "stop_loss_pct": 2,
+    "retry_delay": 5,
+    "signal_check_interval": 100,
+    "rsi_window": 14,
+    "short_ma_window": 50,
+    "long_ma_window": 200,
+    "bollinger_window": 20,
+    "bollinger_std_dev": 2,
+    "volume_spike_threshold": 1.5
+}

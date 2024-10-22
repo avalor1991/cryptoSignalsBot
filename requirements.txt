@@ -1,0 +1,9 @@
+ccxt
+python-telegram-bot # Ensure correct version
+requests
+pandas
+apscheduler
+python-dotenv
+numpy
+urllib3  # Explicitly include urllib3
+six  # Explicitly include six
